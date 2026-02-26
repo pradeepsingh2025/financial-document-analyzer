@@ -47,3 +47,6 @@ pydantic>=1.10.13
 pydantic_core>=2.8.0
 pymupdf
 typer>=0.24.0
+celery
+redis
+websockets

@@ -1,7 +1,7 @@
 # Financial Document Analyzer
 
 ## Project Overview
-A comprehensive financial document analysis system that processes corporate reports, financial statements, and investment documents using AI-powered analysis agents (CrewAI) exposed via a FastAPI backend.
+A comprehensive financial document analysis system that processes corporate reports, financial statements, and investment documents using AI-powered analysis agents (CrewAI). It exposes a FastAPI backend leveraging a robust Queue Worker Model (Celery and Redis) for reliable, non-blocking asynchronous document processing via WebSockets.
 
 ## Bugs Found and How They Were Fixed
 
@@ -24,6 +24,7 @@ During the debugging phase of this project, several critical issues were identif
 
 ### Prerequisites
 - Python 3.9+
+- Redis (Running locally or via Docker)
 - Obtain a [Serper API Key](https://serper.dev/) for web search functionalities.
 - Appropriate LLM API keys (e.g., `GEMINI_API_KEY` depending on the configured CrewAI LLM).
 
@@ -46,21 +47,37 @@ During the debugging phase of this project, several critical issues were identif
    ```
 
 ### Running the Application
-Start the FastAPI server using Uvicorn:
-```sh
-uvicorn main:app --host 0.0.0.0 --port 8000 --reload
-```
-Or simply run the main script:
-```sh
-python main.py
-```
+
+This application requires three components to be running concurrently: Redis, the Celery Worker, and the FastAPI application.
+
+1. **Start Redis Server:**
+   You can run Redis quickly using Docker:
+   ```sh
+   docker run -p 6379:6379 -d redis
+   ```
+   *(Ensure Redis is running on `localhost:6379` before starting the worker).*
+
+2. **Start the Celery Worker:**
+   Open a new terminal, activate your virtual environment, and run the worker:
+   ```sh
+   # On Linux/macOS
+   celery -A celery_worker worker --loglevel=info
+   
+   # On Windows (use the solo pool to avoid multiprocessing issues)
+   celery -A celery_worker worker --loglevel=info --pool=solo
+   ```
+
+3. **Start the FastAPI Server:**
+   Open another terminal, activate your virtual environment, and start Uvicorn:
+   ```sh
+   uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+   ```
 
 ### Usage
-Once the server is running, you can interact with the API via the `/analyze` endpoint to upload financial documents (like Tesla's Q2 2025 financial update) and receive AI-driven investment analysis.
-
-**Sample Document Testing:**
+Because document analysis can be slow, this application uses an asynchronous Queue Worker model with WebSockets.
 1. Download a financial report (e.g., Tesla Q2 2025 Update) and save it locally.
-2. Send a POST request to `http://localhost:8000/analyze` with the PDF attached as form-data underneath the key `file`. You can also include a custom analysis request via the `query` form field.
+2. Send a POST request to `http://localhost:8000/analyze` with the PDF attached as form-data underneath the key `file`. You will immediately receive a `task_id`.
+3. Connect to the WebSocket endpoint at `ws://localhost:8000/ws/status/{task_id}` to receive real-time updates and the final result.
 
 ## API Documentation
 
@@ -80,23 +97,46 @@ The application exposes a RESTful API powered by FastAPI. You can explore the in
 
 #### 2. Analyze Financial Document
 - **Endpoint:** `POST /analyze`
-- **Description:** Uploads a financial document (PDF) and an optional query. The CrewAI agents process the document to extract metrics, assess risks, and provide investment recommendations based on the user query.
+- **Description:** Uploads a financial document (PDF) and queues it for analysis by the CrewAI agents. Returns a task ID immediately.
 - **Content-Type:** `multipart/form-data`
 - **Parameters:**
-  - `file` (File, required): The PDF document to be analyzed (uploaded via form data).
-  - `query` (String, optional): The custom analysis request or question. Defaults to *"Analyze this financial document for investment insights"*.
-- **Success Response (200 OK):**
+  - `file` (File, required): The PDF document to be analyzed.
+  - `query` (String, optional): Custom analysis request. Defaults to *"Analyze this financial document for investment insights"*.
+- **Success Response (202 Accepted):**
   ```json
   {
-    "status": "success",
-    "query": "Analyze this financial document for investment insights",
-    "analysis": "<Detailed AI-generated analysis and recommendation>",
-    "file_processed": "sample.pdf"
+      "status": "processing",
+      "task_id": "4b9f34a1-8d2b-41c9-a99f-723df76a0c20",
+      "message": "Document analysis has been queued.",
+      "file_processed": "sample.pdf"
   }
   ```
-- **Error Response (500 Internal Server Error):**
-  ```json
-  {
-    "detail": "Error processing financial document: <error_message>"
-  }
-  ```
+
+#### 3. Real-time Status via WebSockets
+- **Endpoint:** `ws://localhost:8000/ws/status/{task_id}`
+- **Description:** Connect to this WebSocket endpoint to receive real-time status updates and the final analysis result.
+- **Message Format:**
+  - *While processing:*
+    ```json
+    {
+      "task_id": "4b9f34a1-8d2b-41c9-a99f-723df76a0c20",
+      "status": "STARTED",
+      "message": "Initializing financial crew..."
+    }
+    ```
+  - *On Success:*
+    ```json
+    {
+      "task_id": "4b9f34a1-8d2b-41c9-a99f-723df76a0c20",
+      "status": "SUCCESS",
+      "result": "<Detailed AI-generated analysis and recommendation>"
+    }
+    ```
+  - *On Failure:*
+     ```json
+    {
+      "task_id": "4b9f34a1-8d2b-41c9-a99f-723df76a0c20",
+      "status": "FAILURE",
+      "error": "<Error message detailing why the process failed>"
+    }
+    ```

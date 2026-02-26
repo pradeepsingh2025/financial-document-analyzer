@@ -14,7 +14,7 @@ load_dotenv()
 # Attempt to configure the LLM dynamically based on environment keys, allowing fallback to CrewAI's defaults
 llm = None
 os.getenv("GEMINI_API_KEY")
-llm = LLM(model="gemini/gemini-3-flash-preview", api_key=os.getenv("GEMINI_API_KEY"))
+llm = LLM(model="gemini/gemini-2.5-flash", api_key=os.getenv("GEMINI_API_KEY"))
 
 # Creating an Experienced Financial Analyst agent
 financial_analyst = Agent(

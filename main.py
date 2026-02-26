@@ -1,7 +1,17 @@
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 import os
 import uuid
 import asyncio
+
+from fastapi import (
+    FastAPI,
+    File,
+    UploadFile,
+    Form,
+    HTTPException,
+    WebSocket,
+    WebSocketDisconnect,
+)
+from celery.result import AsyncResult
 
 from crewai import Crew, Process
 from agents import financial_analyst, verifier, investment_advisor, risk_assessor
@@ -11,6 +21,7 @@ from task import (
     risk_assessment,
     investment_analysis,
 )
+from celery_worker import celery_app
 
 app = FastAPI(title="Financial Document Analyzer")
 
@@ -63,28 +74,77 @@ async def analyze_financial_document_api(
         if not query or query.strip() == "":
             query = "Analyze this financial document for investment insights"
 
-        # Process the financial document with all analysts
-        response = await asyncio.to_thread(run_crew, query.strip(), file_path)
+        # Dispatch the task to Celery
+        task = celery_app.send_task(
+            "analyze_document",
+            args=[query.strip(), file_path],
+        )
 
         return {
-            "status": "success",
-            "query": query,
-            "analysis": str(response),
+            "status": "processing",
+            "task_id": task.id,
+            "message": "Document analysis has been queued.",
             "file_processed": file.filename,
         }
 
     except Exception as e:
+        # If queuing fails, cleanup local file
+        if os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+            except Exception:
+                pass
         raise HTTPException(
             status_code=500, detail=f"Error processing financial document: {str(e)}"
         )
 
-    finally:
-        # Clean up uploaded file
-        if os.path.exists(file_path):
-            try:
-                os.remove(file_path)
-            except:
-                pass  # Ignore cleanup errors
+
+@app.websocket("/ws/status/{task_id}")
+async def websocket_status_endpoint(websocket: WebSocket, task_id: str):
+    await websocket.accept()
+
+    try:
+        while True:
+            task_result = AsyncResult(task_id, app=celery_app)
+            state = task_result.state
+
+            response_data = {
+                "task_id": task_id,
+                "status": state,
+            }
+
+            if state == "SUCCESS":
+                response_data["result"] = task_result.result.get("result")
+                await websocket.send_json(response_data)
+                break
+
+            elif state == "FAILURE":
+                response_data["error"] = str(task_result.result)
+                await websocket.send_json(response_data)
+                break
+
+            elif state == "STARTED":
+                if (
+                    task_result.info
+                    and isinstance(task_result.info, dict)
+                    and "message" in task_result.info
+                ):
+                    response_data["message"] = task_result.info.get("message")
+
+            # Send current status
+            await websocket.send_json(response_data)
+
+            # Poll every 2 seconds
+            await asyncio.sleep(2)
+
+    except WebSocketDisconnect:
+        print(f"WebSocket client disconnected for task {task_id}")
+    except Exception as e:
+        print(f"WebSocket error: {str(e)}")
+        try:
+            await websocket.close(code=1011, reason=str(e)[:100])
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
